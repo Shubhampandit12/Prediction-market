@@ -1,0 +1,55 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String         @id @default(cuid())
+  email        String         @unique
+  passwordHash String
+  usdBalance   Int            @default(0)
+  positions    Position[]
+  orders       OrderHistory[]
+}
+
+model Market {
+  id                    String         @id @default(cuid())
+  title                 String
+  description           String
+  resolutionDescription String
+  yesOrderbook          String         @default("{}")
+  noOrderbook           String         @default("{}")
+  totalQty              Int            @default(0)
+  resolution            String?
+  createdBy             String?
+  positions             Position[]
+  orders                OrderHistory[]
+}
+
+model Position {
+  id       String @id @default(cuid())
+  userId   String
+  marketId String
+  type     String
+  qty      Int
+  user     User   @relation(fields: [userId], references: [id])
+  market   Market @relation(fields: [marketId], references: [id])
+
+  @@unique([userId, marketId, type])
+}
+
+model OrderHistory {
+  id        String   @id @default(cuid())
+  orderType String
+  qty       Int
+  price     Int
+  userId    String
+  marketId  String
+  user      User     @relation(fields: [userId], references: [id])
+  market    Market   @relation(fields: [marketId], references: [id])
+  createdAt DateTime @default(now())
+}
