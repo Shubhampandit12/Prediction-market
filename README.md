@@ -1,315 +1,130 @@
-# Prediction Market Clone
+# Prediction Market
 
-A free, self-hostable, fully studiable Polymarket-style prediction market application featuring a central limit order book (CLOB) matching engine, binary YES/NO shares priced in cents, pair-minting via reverse orders, split/merge primitives, market creation, and market resolution with automatic settlement. Built as a portfolio project to demonstrate real-time financial matching logic without any paid dependencies. Inspired by and credited to [Harkirat Singh's prediction-market repo](https://github.com/hkirat/prediction-market).
+A self-hosted clone of a Polymarket-style binary prediction market: a central limit order book (CLOB), YES/NO shares priced in cents, and the "reverse order" mechanism that lets two opposing bettors mint a new share pair out of nothing. I built it to actually understand how a CLOB-based prediction market works mechanically, not just conceptually — the kind of thing that's easy to nod along to in a blog post and much harder to get right when you're the one writing the balance updates. It's a rebuild of [hkirat/prediction-market](https://github.com/hkirat/prediction-market), swapped onto a stack that runs with zero external services: SQLite instead of Supabase/Postgres, email/password JWT auth instead of OAuth, and a from-scratch resolution/settlement flow the original didn't have.
 
----
+## 1. What it does
 
-## Features
+Users register with email/password, get a JWT, and can then trade binary markets ("Will X happen by Y?"). Every market has two independent order books, one for YES shares and one for NO, both stored as JSON blobs on the `Market` row (`{ "62": { availableQty: 150, orders: [...] } }`, keyed by price in cents). Orders are limit orders only — buy or sell, YES or NO, at a price from 1 to 99 cents. Matching happens synchronously inside a Prisma transaction, so a placed order is either fully accounted for (balances and positions updated) or it fails outright; there's no async settlement step.
 
-| Feature | Description |
-|---------|-------------|
-| **CLOB Matching Engine** | Limit-order book with price-time priority, cheapest-first matching |
-| **YES + NO = 100c Invariant** | Binary outcome shares always sum to $1.00 |
-| **Reverse-Order Pair Minting** | Unmatched buys post on the opposite book; when matched, the system mints a new YES+NO pair from thin air |
-| **Split / Merge** | Atomic basket primitive: split $1 into 1 YES + 1 NO, or merge them back |
-| **Market Creation** | Any authenticated user can create new binary markets |
-| **Market Resolution & Settlement** | Resolve a market as YES or NO; winners auto-credited at $1/share, positions cleared |
-| **Email/Password Auth** | JWT-based authentication (no wallet, no third-party OAuth) |
-| **Onramp / Offramp** | Simulated fiat on/off-ramp for demo purposes |
-| **Order History** | Full audit trail of buys, sells, splits, merges, and settlements |
-| **Positions Dashboard** | Live view of user's open positions across all markets |
+On top of ordinary limit-order matching there are two other primitives: split (pay N cents, receive N YES + N NO shares) and merge (burn N YES + N NO, get N cents back), and market resolution (an authenticated user marks a market YES or NO, winning positions get paid 100c/share, everything else is zeroed out). None of this touches real money — the onramp/offramp endpoints just increment or decrement a balance column.
 
----
+## 2. The matching engine, and why it's the interesting part
 
-## Architecture
+The core invariant is that a YES share and a NO share always sum to 100 cents. If YES is worth 62c, NO is implicitly worth 38c, because together they represent "$1 if this resolves, paid to whoever's right."
+
+The mechanism that keeps that invariant alive without a market maker is what the original project calls a reverse order. When a buy order can't be fully filled from the matching side of the book, the engine doesn't rest the leftover quantity on the same book — it posts a synthetic sell order on the *opposite* book, at `100 - price`. If that synthetic order later gets matched by someone buying the opposite side, the system doesn't transfer existing shares between two people (there aren't any) — it mints a brand new YES+NO pair, funded by both traders' cash.
+
+I traced this end-to-end against a running instance rather than just reading the code, because the "conservation of value" claim is exactly the kind of thing that's easy to get subtly wrong in the accounting:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Browser (:5173)                          │
-│  React 19 + Vite + TypeScript + hand-rolled dark CSS            │
-│  ┌────────────┐ ┌────────────┐ ┌───────────┐ ┌──────────────┐  │
-│  │ MarketList │ │MarketDetail│ │ OrderForm │ │ SplitMerge   │  │
-│  └────────────┘ └────────────┘ └───────────┘ └──────────────┘  │
-│  ┌────────────┐ ┌────────────┐ ┌───────────┐ ┌──────────────┐  │
-│  │ Positions  │ │OrderHistory│ │  Balance  │ │CreateMarket  │  │
-│  └────────────┘ └────────────┘ └───────────┘ └──────────────┘  │
-└───────────────────────────┬─────────────────────────────────────┘
-                            │ axios (JSON over HTTP)
-                            ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                     Express API (:3000)                          │
-│  Node 18+ / Express 4 / TypeScript (ESM)                        │
-│  ┌──────┐ ┌──────┐ ┌──────────┐ ┌──────────┐ ┌─────────────┐  │
-│  │ auth │ │orders│ │split-merge│ │  resolve │ │  markets    │  │
-│  └──────┘ └──────┘ └──────────┘ └──────────┘ └─────────────┘  │
-│                    ┌──────────────────┐                          │
-│                    │  matching.ts     │ <-- CLOB engine          │
-│                    └────────┬─────────┘                          │
-│                             │ Prisma ORM                         │
-└─────────────────────────────┼───────────────────────────────────┘
-                              ▼
-                   ┌─────────────────────┐
-                   │   SQLite (dev.db)   │
-                   │  Users, Markets,    │
-                   │  Positions, Orders  │
-                   └─────────────────────┘
+1. Fresh market, empty order books. Alice (authenticated, funded) submits BUY 10 YES @ 60c.
+   -> No YES asks exist, so nothing matches.
+   -> Engine posts a reverse order on the NO book at 100 - 60 = 40c:
+      noOrderbook["40"] = { availableQty: 10, orders: [{ userId: alice, reverseOrder: true, qty: 10 }] }
+
+2. Bob (different account) submits BUY 10 NO @ 40c.
+   -> Engine finds Alice's reverse order on the NO book at 40c and matches it.
+   -> Because it's a reverse order, the engine mints a new pair instead of transferring shares:
+        Alice's balance -= 600  (10 * 60c, charged when her order first posted... functionally settled here)
+        Bob's balance   -= 400  (10 * 40c)
+        Alice's position: +10 YES
+        Bob's position:   +10 NO
+
+Result confirmed via the running API: Alice ends up with exactly 10 YES, Bob with exactly
+10 NO, and the combined debit is exactly 1000 cents = 10 pairs * 100c/pair. Both order
+books are empty again afterward. Conservation holds exactly, to the cent, with real
+requests against a real SQLite-backed server — not just by reading the arithmetic.
 ```
 
-### Tech Stack
+The same four-branch logic (yes/buy, yes/sell, no/buy, no/sell) repeats with the sides swapped in `matching.ts`, and it's genuinely repetitive — about 450 lines for what is conceptually one idea applied four ways. That repetition is a real cost of this design: any bug fix to the matching logic has to be applied in up to four places by hand, and there's no shared helper doing the "walk price levels, match orders, credit/debit both sides" loop. Split/merge is the simpler counterpart: it doesn't touch the order books at all, just moves cents into equal YES+NO positions (split) or burns equal YES+NO back into cents (merge), which is how a market can have two-sided liquidity before anyone has actually traded against anyone else.
 
-| Layer | Technology | Notes |
-|-------|-----------|-------|
-| Frontend | React 19, Vite 6, TypeScript 5 | Single-page app, dark UI |
-| HTTP Client | Axios | Token stored in localStorage |
-| Backend | Node 18+, Express 4, TypeScript (ESM) | Hot-reload via tsx |
-| ORM | Prisma 5 | Type-safe DB access |
-| Database | SQLite | Zero-config, file-based |
-| Auth | JWT (jsonwebtoken) + bcryptjs | Stateless, bearer token |
-| Validation | Zod | Runtime schema checks on every endpoint |
-| Monorepo | npm workspaces + concurrently | Single `npm run dev` boots both |
+## 3. Rough edges I found by actually running it
 
----
+Reading the matching engine convinced me it was correct; running the rest of the app is what turned up the gaps. These aren't hypothetical — I hit each of them with `curl` against a live server before writing this down.
 
-## How the Matching Engine Works
+**Every list endpoint wraps its payload, and most of the frontend silently swallows the mismatch.** `GET /markets`, `GET /positions`, and `POST /history` all return `{ markets: [...] }` / `{ positions: [...] }` / `{ history: [...] }` — an object, not a bare array. But `frontend/src/api.ts` types each of these calls as returning `Market[]` / `Position[]` / `OrderHistory[]` directly. Three of the four consumers (`App.tsx`, `Positions.tsx`, `OrderHistory.tsx`) guard against this with `Array.isArray(data) ? data : []`, so instead of a crash you get a silently empty list — the UI just never shows any markets, positions, or history, and there's no error in the console to point at why. TypeScript doesn't catch it because `axios`'s `response.data` is typed `any`.
 
-This is the intellectual core of the project -- the thing worth discussing in a technical interview.
+**`GET /balance` hits the same mismatch with no guard at all.** The backend returns `{ balance: N }`; `Balance.tsx` reads `data.usdBalance / 100` with no fallback, so the balance display always renders `$NaN`.
 
-### 1. Prices in Cents (1-99), YES + NO = 100
+**The JWT the frontend decodes doesn't have the fields it's looking for.** `backend/src/auth.ts` signs the token as `jwt.sign({ userId: user.id }, ...)`. `frontend/src/hooks/useUser.ts` decodes it looking for `payload.sub` and `payload.email` — neither of which the token contains — so after login `user.email` is always an empty string in the header, even though auth itself works fine (the backend re-verifies the token independently and reads `userId`, which *is* present).
 
-Every market is a binary question. A YES share and a NO share always sum to 100 cents ($1.00). If YES trades at 62c, the implied NO price is 38c. At resolution, the winning side pays out $1.00 per share; the losing side pays $0.00.
+**`Market.totalQty`, shown in the UI as "liquidity," is never updated after creation.** It's set once when a market is created (always 0 through the API; the seed script hardcodes it) and no route — not the matching engine, not split/merge — ever touches it again. Any market created through the app shows "0 shares" of liquidity forever, regardless of how much actually trades.
 
-### 2. The Order Book Shape
+**The seed script fails out of the box.** `npm run seed` throws `Environment variable not found: DATABASE_URL` unless you export it in your shell first, even with a `.env` file present. The reason: `env.ts` loads `dotenv/config`, but `db.ts` (which `seed.ts` imports directly) doesn't, so the Prisma client seed.ts constructs never sees the `.env` file. `npm run dev` doesn't have this problem because it imports `env.ts` first, which pulls in `dotenv/config` as a side effect.
 
-Each market has two order books (stored as JSON in SQLite):
+None of these are in the matching engine itself, which is the part I actually verified carries the interesting logic correctly. They're contract mismatches between what the backend sends and what the frontend expects — the kind of thing that's invisible until you actually run both halves together and click around, which is exactly what I did before writing this list.
 
-```
-yesOrderbook: { [price: string]: { availableQty, orders[] } }
-noOrderbook:  { [price: string]: { availableQty, orders[] } }
-```
+## 4. Stack
 
-Each price level holds a FIFO queue of orders. Orders can be either **direct** (user is selling a share they own) or **reverse** (a synthetic ask placed by the engine when a buy went unmatched).
+Backend: Node 18+, Express 4, TypeScript (ESM), Prisma 5 against SQLite, Zod for request validation, JWT (`jsonwebtoken`) + `bcryptjs` for auth. Frontend: React 19 + Vite 6 + TypeScript, Axios, no state library — hooks and prop drilling. A root-level `npm run dev` boots both via `concurrently`. No Docker, no Postgres, no paid services — everything runs on one machine.
 
-### 3. Standard Matching: Cheapest-First
+I ran `tsc --noEmit` on the backend and `tsc -b && vite build` on the frontend; both are clean with no type errors. There's no automated test suite (no Jest/Vitest config, no test files) — verification here was done by running the actual server and hitting real endpoints with `curl`, as described above.
 
-When a BUY YES @ 62c arrives, the engine scans the YES sell side from the lowest asking price upward. Any ask at or below 62c is matched:
-
-```
-Buyer wants:  5 YES @ 62c
-Sell book:    3 YES @ 60c, 4 YES @ 62c
-
-Result:
-  - Match 3 @ 60c (buyer pays 60c each, seller delivers existing YES shares)
-  - Match 2 @ 62c (buyer pays 62c each, seller delivers existing YES shares)
-  - Buyer now holds 5 YES shares
-```
-
-### 4. The Reverse-Order Mechanism (Pair-Minting)
-
-This is the clever part. When a buy has leftover quantity after scanning the same-side book, the engine does NOT simply rest the order on the same book. Instead:
-
-> **It posts a REVERSE order on the OPPOSITE book at (100 - price).**
-
-When that reverse order is later matched, the system MINTS a fresh YES+NO pair from nothing (since YES + NO = $1.00, no value is created or destroyed).
-
-#### Concrete Example
-
-```
-1. Alice submits: BUY 10 YES @ 60c
-   - The YES sell book is empty. No match.
-   - Engine posts a REVERSE order on the NO book: SELL 10 NO @ 40c
-     (because 100 - 60 = 40)
-
-2. Bob submits: BUY 10 NO @ 40c
-   - Engine scans the NO sell book, finds Alice's reverse order at 40c.
-   - MATCH! But this is a reverse order, so instead of transferring
-     existing NO shares, the system MINTS a new pair:
-
-     Alice gets: 10 YES shares (she paid 60c each = $6.00 total)
-     Bob gets:   10 NO shares  (he paid 40c each = $4.00 total)
-     Total cost: $6.00 + $4.00 = $10.00 = 10 pairs * $1.00 per pair
-
-   Conservation holds: 10 YES + 10 NO minted, funded by exactly $10.
-```
-
-This mechanism means liquidity can exist even with zero pre-existing shares -- two opposing bettors create the market simply by placing orders.
-
-### 5. Split and Merge: The Atomic Basket Primitive
-
-**Split**: Pay N cents, receive N YES shares + N NO shares. This is how a market maker can bootstrap both sides of the book without taking directional risk.
-
-**Merge**: Burn N YES + N NO shares, receive N cents back. This lets a trader exit a hedged position or arbitrage a mispricing.
-
-```
-Split $5.00:   -500c balance  -->  +500 YES, +500 NO
-Merge 200:     -200 YES, -200 NO  -->  +200c balance
-```
-
-Together, split/merge + the reverse-order mechanism form a complete system: shares can be created (split or pair-mint), transferred (order matching), and destroyed (merge or resolution).
-
-### 6. Settlement (Resolution)
-
-When a market resolves:
-1. The winning side (YES or NO) pays out 100c per share.
-2. The losing side pays out 0c.
-3. All positions are deleted; both order books are cleared.
-
----
-
-## Prerequisites
-
-- **Node.js 18+** (tested on 20 and 22)
-- **npm** (comes with Node)
-
-No Docker, no Postgres, no Redis, no paid services.
-
----
-
-## Getting Started
+## 5. Running it
 
 ```bash
-# 1. Clone the repo
-git clone <your-repo-url> prediction-market-clone
-cd prediction-market-clone
+git clone https://github.com/Shubhampandit12/Prediction-market.git
+cd Prediction-market
 
-# 2. Install root dependencies (concurrently)
-npm install
+npm install                      # root: installs `concurrently`
 
-# 3. Install backend dependencies
 cd backend
 npm install
-
-# 4. Generate Prisma client + run migrations
+cp .env.example .env
 npx prisma generate
-npx prisma migrate dev --name init
+npx prisma migrate deploy        # or: npx prisma migrate dev --name init
 
-# 5. Seed the database (5 markets, 3 users, orderbook liquidity)
+# seed.ts imports db.ts directly, which doesn't load dotenv — export DATABASE_URL
+# yourself or `npm run seed` will fail with "Environment variable not found: DATABASE_URL"
+export DATABASE_URL="file:./prisma/dev.db"
 npm run seed
 
-# 6. Install frontend dependencies
 cd ../frontend
 npm install
 
-# 7. Run both servers (from project root)
 cd ..
-npm run dev
+npm run dev                      # backend on :3000, frontend on :5173
 ```
 
-Open http://localhost:5173 in your browser. The backend API is at http://localhost:3000.
+Open http://localhost:5173. The seed script (`backend/src/seed.ts`) creates 5 markets and 3 users — `alice@example.com`, `bob@example.com`, `charlie@example.com`, all with password `password123`, starting balances $100 / $150 / $200 respectively — and pre-populates order-book liquidity on the first two markets so there's something to look at immediately.
 
-### Seeded Users (for quick login)
-
-| Email | Password | Starting Balance |
-|-------|----------|-----------------|
-| alice@test.com | password123 | $100.00 (10000c) |
-| bob@test.com | password123 | $100.00 (10000c) |
-| carol@test.com | password123 | $100.00 (10000c) |
-
----
-
-## How It Differs from the Original
-
-| Aspect | Original (hkirat/prediction-market) | This Clone |
-|--------|-------------------------------------|------------|
-| Auth | Supabase Auth (Google OAuth) | Email/password + JWT |
-| Database | PostgreSQL (via Supabase) | SQLite (zero-config, portable) |
-| ORM | Direct Supabase client | Prisma 5 with typed queries |
-| User Identity | Wallet-based | Email-based |
-| Market Creation | Not supported | Full CRUD via `/markets` endpoint |
-| Resolution / Settlement | Not implemented | Full resolution with winner payout |
-| Hosting Dependencies | Supabase project required | Fully self-contained, runs offline |
-| Frontend Framework | React + Next.js | React 19 + Vite (no SSR needed) |
-| State Management | Recoil | Hooks + prop drilling (simpler) |
-| Deployment | Vercel + Supabase | Single machine, `npm run dev` |
-
----
-
-## 2-Week Study Roadmap
-
-A dependency-ordered reading plan for understanding (and being able to explain) every piece of this system in an interview.
-
-| Day | Focus | Files to Read | What You Should Understand After |
-|-----|-------|---------------|----------------------------------|
-| 1 | Database Schema | `backend/prisma/schema.prisma` | The four tables (User, Market, Position, OrderHistory), their relations, the `@@unique` constraint on positions, orderbooks stored as JSON strings |
-| 2 | Shared Types & Validation | `backend/src/types.ts` | The Orderbook type shape, Zod schemas for every endpoint, why `price` and `qty` are integers (cents, not dollars) |
-| 3 | Auth Flow | `backend/src/auth.ts`, `backend/src/middleware.ts` | JWT creation, bcrypt hashing, the `requireAuth` middleware that sets `req.userId` |
-| 4-5 | The Matching Engine (core) | `backend/src/matching.ts` | All four branches (yes/buy, yes/sell, no/buy, no/sell), how reverse orders post on the opposite book, how pair-minting works, the cheapest-first sort |
-| 6 | Split / Merge | `backend/src/routes/split-merge.ts` | The basket primitive, conservation of value, how it enables market-making |
-| 7 | Resolution & Settlement | `backend/src/routes/resolve.ts` | Winner payout logic (qty * 100c), position deletion, orderbook clearing |
-| 8 | Order Placement Route | `backend/src/routes/orders.ts` | How the route wraps `executeOrder` in a Prisma `$transaction`, balance checks, response shape |
-| 9 | Frontend API Contract | `frontend/src/api.ts`, `frontend/src/types.ts` | Every endpoint the frontend calls, token management in localStorage, request/response shapes |
-| 10 | MarketDetail + OrderForm | `frontend/src/components/MarketDetail.tsx`, `frontend/src/components/OrderForm.tsx` | How the UI renders the orderbook, price display logic, form submission, error handling |
-| 11 | Remaining Components | `frontend/src/components/` (all remaining) | Positions, Balance, CreateMarket, ResolveMarket, SplitMerge, OrderHistory |
-| 12 | Seed Script & E2E Flow | `backend/src/seed.ts` | How test data is created, how orderbook JSON is built programmatically |
-| 13 | Edge Cases & Invariants | Re-read `matching.ts` with focus on edge cases | What happens with partial fills, self-matching prevention (or lack thereof), zero-quantity cleanup |
-| 14 | Whiteboard Practice | None (close the editor) | Draw the matching engine from memory, walk through the Alice/Bob pair-minting example, explain split/merge, explain settlement |
-
----
-
-## Known Limitations
-
-- **No real money.** The onramp/offramp is simulated -- no payment processor integration.
-- **No order cancellation.** Once an order rests on the book, it stays until matched or the market resolves.
-- **No time-series price chart.** There is no historical price tracking or candlestick data.
-- **Single-server, not horizontally scalable.** SQLite serializes writes; this is a demo, not production infrastructure.
-- **No WebSocket push.** The frontend polls on navigation; there are no real-time orderbook updates.
-- **No partial-fill notifications.** If an order partially fills and the rest goes to the book, the user only sees the final state.
-- **Self-trade is not prevented.** A user can technically match their own orders.
-- **No admin role.** Any authenticated user can resolve any market (suitable for demo; would need RBAC in production).
-
----
-
-## Project Structure
+## 6. Project layout
 
 ```
-prediction-market-clone/
-├── package.json              # Root monorepo scripts (dev, dev:backend, dev:frontend)
+Prediction-market/
+├── package.json                  # root: npm run dev via concurrently
 ├── backend/
-│   ├── package.json          # Express + Prisma + JWT dependencies
 │   ├── prisma/
-│   │   ├── schema.prisma     # Database schema (4 models)
-│   │   └── dev.db            # SQLite database file (after migration)
+│   │   ├── schema.prisma         # User, Market, Position, OrderHistory
+│   │   └── migrations/
 │   └── src/
-│       ├── index.ts          # Express app setup, route registration
-│       ├── db.ts             # Prisma client singleton
-│       ├── env.ts            # Environment config (PORT, JWT_SECRET, DATABASE_URL)
-│       ├── auth.ts           # /auth/register, /auth/login endpoints
-│       ├── middleware.ts     # JWT verification middleware
-│       ├── matching.ts       # CLOB matching engine (the heart of the app)
-│       ├── types.ts          # Zod schemas + TypeScript types
-│       ├── seed.ts           # Database seeder (users, markets, orderbook liquidity)
+│       ├── index.ts              # Express app, route wiring
+│       ├── env.ts                # zod-validated env vars (loads dotenv)
+│       ├── db.ts                 # Prisma client singleton (no dotenv import)
+│       ├── auth.ts                # /auth/register, /auth/login, /auth/logout
+│       ├── middleware.ts         # JWT verification -> req.userId
+│       ├── matching.ts           # the CLOB engine, ~450 lines, 4 branches
+│       ├── types.ts              # Zod schemas + Orderbook type
+│       ├── seed.ts               # demo data
 │       └── routes/
-│           ├── orders.ts     # POST /order (delegates to matching engine)
-│           ├── markets.ts    # GET /markets, GET /market, POST /markets
-│           ├── resolve.ts    # POST /markets/:id/resolve (settlement)
-│           ├── split-merge.ts# POST /split, POST /merge
-│           ├── balance.ts    # GET /balance, POST /onramp, POST /offramp
-│           ├── positions.ts  # GET /positions
-│           └── history.ts    # POST /history (order audit trail)
+│           ├── orders.ts         # POST /order -> matching.ts, in a transaction
+│           ├── markets.ts        # GET/POST /markets, GET /market
+│           ├── split-merge.ts    # POST /split, POST /merge
+│           ├── resolve.ts        # POST /markets/:id/resolve -> settlement
+│           ├── balance.ts        # GET /balance, POST /onramp, /offramp
+│           ├── positions.ts      # GET /positions
+│           └── history.ts        # POST /history
 └── frontend/
-    ├── package.json          # React 19 + Vite + Axios
     └── src/
-        ├── main.tsx          # React entry point
-        ├── App.tsx           # Root component with routing/state
-        ├── api.ts            # Axios wrapper for all backend endpoints
-        ├── types.ts          # Frontend TypeScript interfaces
-        ├── App.css           # Dark theme styles
-        ├── index.css         # Global CSS reset
-        ├── hooks/
-        │   └── useUser.ts    # Auth state hook
+        ├── App.tsx                # tab-based layout, auth gate
+        ├── api.ts                 # axios wrapper for every backend route
+        ├── hooks/useUser.ts        # decodes the JWT client-side for display
         └── components/
-            ├── MarketList.tsx    # Browse all markets
-            ├── MarketDetail.tsx  # Single market view with orderbook
-            ├── OrderForm.tsx     # Buy/sell order form
-            ├── SplitMerge.tsx    # Split/merge interface
-            ├── Positions.tsx     # User's open positions
-            ├── OrderHistory.tsx  # Trade history table
-            ├── Balance.tsx       # Balance + onramp/offramp
-            ├── CreateMarket.tsx  # New market form
-            └── ResolveMarket.tsx # Market resolution controls
+            ├── MarketList.tsx, MarketDetail.tsx, OrderForm.tsx
+            ├── SplitMerge.tsx, Positions.tsx, OrderHistory.tsx
+            ├── Balance.tsx, CreateMarket.tsx, ResolveMarket.tsx
 ```
 
----
+## 7. License
 
-## License
-
-MIT. Use it, study it, put it on your CV.
+MIT.
