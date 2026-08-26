@@ -1,0 +1,41 @@
+# Fly.io deploy config. Rename `app` to something unique before `fly launch`.
+#
+# SQLite lives on a Fly volume mounted at /data, which survives redeploys —
+# unlike the container's own disk, which is wiped every time. This only works
+# safely with a single machine: Fly volumes are per-machine, not shared or
+# replicated, so scaling to more than one machine would give each instance
+# its own separate, diverging database. If you outgrow one machine, switch
+# the datasource to Postgres (see README) rather than adding volumes/machines.
+app = "prediction-market"
+primary_region = "iad"
+
+[build]
+
+[env]
+  PORT = "3000"
+  NODE_ENV = "production"
+  DATABASE_URL = "file:/data/prod.db"
+  # Update after your first deploy once you know the app's real fly.dev URL
+  # (or your custom domain) — required for CORS/cookies to work.
+  FRONTEND_URL = "https://prediction-market.fly.dev"
+
+# JWT_SECRET is deliberately not set here — fly.toml is checked into git.
+# Set it as a secret instead: fly secrets set JWT_SECRET="$(openssl rand -base64 32)"
+
+[[mounts]]
+  source = "prediction_market_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[http_service.checks]]
+  grace_period = "10s"
+  interval = "30s"
+  method = "GET"
+  timeout = "5s"
+  path = "/health"
