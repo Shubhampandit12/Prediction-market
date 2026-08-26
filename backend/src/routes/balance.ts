@@ -12,7 +12,7 @@ const router = Router();
 router.get("/balance", requireAuth, async (req, res) => {
   const userId = req.userId;
   const user = await prisma.user.findFirst({ where: { id: userId } });
-  res.json({ balance: user?.usdBalance });
+  res.json({ usdBalance: user?.usdBalance ?? 0 });
 });
 
 /**

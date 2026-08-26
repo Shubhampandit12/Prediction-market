@@ -1,7 +1,12 @@
 import axios from "axios";
 import type { Market, Position, OrderHistory } from "./types";
 
-const API_BASE = "http://localhost:3000";
+// In the Docker single-image deploy, the backend serves this frontend from
+// its own origin, so API calls should be relative (same-origin, no CORS).
+// In local dev the frontend runs on Vite's dev server (5173) separately from
+// the backend (3000), so it needs an absolute URL. VITE_API_URL overrides
+// either default, e.g. for a build that points at a separately-hosted API.
+const API_BASE = import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? "http://localhost:3000" : "");
 
 function getToken(): string | null {
   return localStorage.getItem("token");
@@ -37,14 +42,14 @@ export const api = {
 
   getMarkets: async (): Promise<Market[]> => {
     const response = await axios.get(`${API_BASE}/markets`);
-    return response.data;
+    return response.data.markets ?? [];
   },
 
   getMarket: async (marketId: string): Promise<Market> => {
     const response = await axios.get(`${API_BASE}/market`, {
       params: { marketId },
     });
-    return response.data;
+    return response.data.market;
   },
 
   // ─── Protected (require auth) ──────────────────────────────────────────────
@@ -73,14 +78,14 @@ export const api = {
     const response = await axios.get(`${API_BASE}/positions`, {
       headers: authHeaders(),
     });
-    return response.data;
+    return response.data.positions ?? [];
   },
 
   getOrderHistory: async (): Promise<OrderHistory[]> => {
     const response = await axios.post(`${API_BASE}/history`, {}, {
       headers: authHeaders(),
     });
-    return response.data;
+    return response.data.history ?? [];
   },
 
   splitPosition: async (data: { marketId: string; amount: number }) => {

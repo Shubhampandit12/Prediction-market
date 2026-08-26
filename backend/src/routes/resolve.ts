@@ -45,6 +45,7 @@ router.post("/markets/:id/resolve", requireAuth, async (req, res) => {
           resolution,
           yesOrderbook: "{}",
           noOrderbook: "{}",
+          totalQty: 0,
         },
       });
 

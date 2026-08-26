@@ -11,7 +11,7 @@ export function Balance() {
   const fetchBalance = async () => {
     try {
       const data = await api.getBalance();
-      setBalance(data.usdBalance / 100);
+      setBalance((data.usdBalance ?? 0) / 100);
     } catch (err) {
       console.error("Failed to fetch balance:", err);
     }

@@ -15,7 +15,7 @@ export function Positions({ markets }: PositionsProps) {
     setLoading(true);
     try {
       const data = await api.getPositions();
-      setPositions(Array.isArray(data) ? data : []);
+      setPositions(data);
     } catch (err) {
       console.error("Failed to fetch positions:", err);
     } finally {

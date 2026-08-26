@@ -1,11 +1,24 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import { prisma } from "./db.js";
 import { env } from "./env.js";
 
 const router = Router();
+
+// Credential-stuffing / brute-force guard: 20 attempts per IP per 15 minutes
+// across register+login, shared so an attacker can't dodge the limit by alternating.
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many attempts, please try again later" },
+});
+
+router.use(authLimiter);
 
 const AuthSchema = z.object({
   email: z.string().email(),
@@ -37,7 +50,7 @@ router.post("/register", async (req, res) => {
     data: { email, passwordHash },
   });
 
-  const token = jwt.sign({ userId: user.id }, env.JWT_SECRET, { expiresIn: "7d" });
+  const token = jwt.sign({ sub: user.id, email: user.email }, env.JWT_SECRET, { expiresIn: "7d" });
 
   // Set httpOnly cookie
   res.cookie("token", token, {
@@ -75,7 +88,7 @@ router.post("/login", async (req, res) => {
     return;
   }
 
-  const token = jwt.sign({ userId: user.id }, env.JWT_SECRET, { expiresIn: "7d" });
+  const token = jwt.sign({ sub: user.id, email: user.email }, env.JWT_SECRET, { expiresIn: "7d" });
 
   res.cookie("token", token, {
     httpOnly: true,

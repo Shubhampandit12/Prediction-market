@@ -53,6 +53,12 @@ router.post("/split", requireAuth, async (req, res) => {
         update: { qty: { increment: data.amount } },
       });
 
+      // Split mints a new YES+NO pair per unit, so total shares outstanding grows by 2x
+      await tx.market.update({
+        where: { id: marketId },
+        data: { totalQty: { increment: data.amount * 2 } },
+      });
+
       // Record in order history
       await tx.orderHistory.create({
         data: {
@@ -134,6 +140,12 @@ router.post("/merge", requireAuth, async (req, res) => {
       await tx.user.update({
         where: { id: userId },
         data: { usdBalance: { increment: data.amount } },
+      });
+
+      // Merge burns a YES+NO pair per unit, so total shares outstanding shrinks by 2x
+      await tx.market.update({
+        where: { id: marketId },
+        data: { totalQty: { decrement: data.amount * 2 } },
       });
 
       // Record in order history

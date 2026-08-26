@@ -106,8 +106,7 @@ function App() {
 
   const fetchMarkets = async () => {
     try {
-      const data = await api.getMarkets();
-      const nextMarkets = Array.isArray(data) ? data : [];
+      const nextMarkets = await api.getMarkets();
       setMarkets(nextMarkets);
       setSelectedMarket((current) =>
         current ? nextMarkets.find((market) => market.id === current.id) || current : current

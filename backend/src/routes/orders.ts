@@ -32,12 +32,13 @@ router.post("/order", requireAuth, async (req, res) => {
       // Run the matching engine
       const result = await executeOrder(tx, userId, data, yesOrderbook, noOrderbook);
 
-      // Persist updated orderbooks
+      // Persist updated orderbooks, plus any new shares minted this order
       await tx.market.update({
         where: { id: data.marketId },
         data: {
           yesOrderbook: JSON.stringify(result.yesOrderbook),
           noOrderbook: JSON.stringify(result.noOrderbook),
+          totalQty: { increment: result.mintedPairs * 2 },
         },
       });
     });

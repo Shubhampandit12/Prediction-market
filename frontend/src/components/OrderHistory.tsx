@@ -15,7 +15,7 @@ export function OrderHistory({ markets }: OrderHistoryProps) {
     setLoading(true);
     try {
       const data = await api.getOrderHistory();
-      setHistory(Array.isArray(data) ? data : []);
+      setHistory(data);
     } catch (err) {
       console.error("Failed to fetch order history:", err);
     } finally {

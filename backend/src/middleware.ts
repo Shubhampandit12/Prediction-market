@@ -32,8 +32,8 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
   }
 
   try {
-    const payload = jwt.verify(token, env.JWT_SECRET) as { userId: string };
-    req.userId = payload.userId;
+    const payload = jwt.verify(token, env.JWT_SECRET) as { sub: string };
+    req.userId = payload.sub;
     next();
   } catch {
     res.status(401).json({ message: "Invalid or expired token" });

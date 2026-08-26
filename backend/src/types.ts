@@ -4,8 +4,8 @@ export const CreateOrderSchema = z.object({
   marketId: z.string(),
   side: z.enum(["yes", "no"]),
   type: z.enum(["buy", "sell"]),
-  price: z.number().int(), // 10 => 0.10$
-  qty: z.number().int(), // 10 => 10qty
+  price: z.number().int().min(1).max(99), // limit orders only trade between 1c and 99c
+  qty: z.number().int().min(1),
 });
 
 export type Orderbook = {
@@ -23,15 +23,15 @@ export type Orderbook = {
 
 export const SplitSchema = z.object({
   marketId: z.string(),
-  amount: z.number(),
+  amount: z.number().int().min(1),
 });
 
 export const OnrampSchema = z.object({
-  amount: z.number(),
+  amount: z.number().positive(),
 });
 
 export const OfframpSchema = z.object({
-  amount: z.number(),
+  amount: z.number().positive(),
 });
 
 export const CreateMarketSchema = z.object({

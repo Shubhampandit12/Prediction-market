@@ -3,4 +3,6 @@ dist
 .env
 backend/prisma/dev.db
 backend/prisma/dev.db-journal
+backend/tests/test.db
+backend/tests/test.db-journal
 .DS_Store
